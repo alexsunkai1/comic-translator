@@ -615,6 +615,23 @@ struct ContentView: View {
                         Text("\(settings.concurrency) 路并行")
                             .font(.callout.monospacedDigit())
                     }
+                    .disabled(translator.isProcessing)
+                    .onChange(of: settings.concurrency) { _, _ in
+                        normalizeTaskConcurrency()
+                    }
+                }
+
+                HStack {
+                    Text("页面并发")
+                        .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $settings.taskConcurrency) {
+                        ForEach(taskConcurrencyOptions, id: \.self) { value in
+                            Text("\(value) 路").tag(value)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(translator.isProcessing)
                 }
 
                 HStack {
@@ -649,6 +666,18 @@ struct ContentView: View {
                 .font(.callout.bold())
         }
         .padding(.horizontal, 4)
+    }
+
+    private var taskConcurrencyOptions: [Int] {
+        let maxValue = max(1, min(settings.concurrency, 8))
+        let options = (1...maxValue).filter { settings.concurrency % $0 == 0 }
+        return options.isEmpty ? [1] : options
+    }
+
+    private func normalizeTaskConcurrency() {
+        let options = taskConcurrencyOptions
+        guard !options.contains(settings.taskConcurrency) else { return }
+        settings.taskConcurrency = options.reversed().first { $0 <= settings.taskConcurrency } ?? 1
     }
 
     // MARK: - 日志

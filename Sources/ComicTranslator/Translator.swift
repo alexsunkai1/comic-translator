@@ -220,7 +220,7 @@ final class ComicTranslator: ObservableObject {
                         inputURL: fileTask.inputURL,
                         settings: settings,
                         api: api,
-                        progressUpdate: { [weak self] progress in
+                        progressUpdate: { @Sendable [weak self] progress in
                             Task { @MainActor [weak self] in
                                 self?.fileTasks[idx].progress = progress
                             }
@@ -257,7 +257,7 @@ final class ComicTranslator: ObservableObject {
         inputURL: URL,
         settings: AppSettings,
         api: TranslationAPI,
-        progressUpdate: @escaping (TaskProgress) -> Void
+        progressUpdate: @escaping @Sendable (TaskProgress) -> Void
     ) async throws -> URL {
         let ext = inputURL.pathExtension.lowercased()
         if SpeechTranscriber.audioExtensions.contains(ext) || SpeechTranscriber.videoExtensions.contains(ext) {
@@ -290,7 +290,7 @@ final class ComicTranslator: ObservableObject {
         inputURL: URL,
         settings: AppSettings,
         api: TranslationAPI,
-        progressUpdate: @escaping (TaskProgress) -> Void
+        progressUpdate: @escaping @Sendable (TaskProgress) -> Void
     ) async throws -> URL {
         let mediaStart = CFAbsoluteTimeGetCurrent()
         let fileName = inputURL.lastPathComponent
@@ -410,7 +410,7 @@ final class ComicTranslator: ObservableObject {
         inputURL: URL,
         settings: AppSettings,
         api: TranslationAPI,
-        progressUpdate: @escaping (TaskProgress) -> Void
+        progressUpdate: @escaping @Sendable (TaskProgress) -> Void
     ) async throws -> URL {
         let pdfStart = CFAbsoluteTimeGetCurrent()
         let outputURL = generatePDFOutputURL(from: inputURL)
@@ -484,7 +484,7 @@ final class ComicTranslator: ObservableObject {
         inputURL: URL,
         settings: AppSettings,
         api: TranslationAPI,
-        progressUpdate: @escaping (TaskProgress) -> Void
+        progressUpdate: @escaping @Sendable (TaskProgress) -> Void
     ) async throws -> URL {
         let archiveStart = CFAbsoluteTimeGetCurrent()
 
@@ -575,6 +575,48 @@ final class ComicTranslator: ObservableObject {
         var ocrTime: Double = 0
         var translateTime: Double = 0
         var renderTime: Double = 0
+
+        mutating func merge(_ other: ProcessingStats) {
+            translated += other.translated
+            skipped += other.skipped
+            failed += other.failed
+            ocrTime += other.ocrTime
+            translateTime += other.translateTime
+            renderTime += other.renderTime
+        }
+    }
+
+    private struct ImageProcessingConfig: Sendable {
+        let sourceLang: String
+        let targetLang: String
+        let domainKey: String
+        let imageConcurrency: Int
+        let apiConcurrencyPerImage: Int
+    }
+
+    private actor ImageProgressReporter {
+        private let totalFiles: Int
+        private let progressUpdate: @Sendable (TaskProgress) -> Void
+        private var lastProgressTime: CFAbsoluteTime = 0
+
+        init(totalFiles: Int, progressUpdate: @escaping @Sendable (TaskProgress) -> Void) {
+            self.totalFiles = totalFiles
+            self.progressUpdate = progressUpdate
+        }
+
+        func report(stage: TaskStage, index: Int, fileName: String, message: String) {
+            let now = CFAbsoluteTimeGetCurrent()
+            let shouldReport = index == 0 || (now - lastProgressTime) > 0.15 || index == totalFiles - 1
+            guard shouldReport else { return }
+            lastProgressTime = now
+            progressUpdate(TaskProgress(
+                stage: stage,
+                currentFile: index + 1,
+                totalFiles: totalFiles,
+                fileName: fileName,
+                message: message
+            ))
+        }
     }
 
     private func processImages(
@@ -584,119 +626,159 @@ final class ComicTranslator: ObservableObject {
         ocrLangs: [String],
         settings: AppSettings,
         api: TranslationAPI,
-        progressUpdate: @escaping (TaskProgress) -> Void
+        progressUpdate: @escaping @Sendable (TaskProgress) -> Void
     ) async throws -> ProcessingStats {
         var stats = ProcessingStats()
-        var lastProgressTime: CFAbsoluteTime = 0
 
-        for (index, relativePath) in imageFiles.enumerated() {
-            try Task.checkCancellation()
+        let requestedImageConcurrency = max(1, settings.taskConcurrency)
+        let imageConcurrency = min(requestedImageConcurrency, max(1, imageFiles.count))
+        let apiConcurrencyPerImage = max(1, settings.concurrency / max(1, imageConcurrency))
+        let config = ImageProcessingConfig(
+            sourceLang: settings.sourceLang,
+            targetLang: settings.targetLang,
+            domainKey: settings.domain.rawValue,
+            imageConcurrency: imageConcurrency,
+            apiConcurrencyPerImage: apiConcurrencyPerImage
+        )
 
-            let inputURL = extractDir.appendingPathComponent(relativePath)
-            let outputURL = outputDir.appendingPathComponent(relativePath)
-            let outputParent = outputURL.deletingLastPathComponent()
-            try? FileManager.default.createDirectory(at: outputParent, withIntermediateDirectories: true)
+        if config.imageConcurrency > 1 {
+            addLog(.info, "   ⚙️ 页面并发: \(config.imageConcurrency) | 每页 API 并发: \(config.apiConcurrencyPerImage)")
+        }
 
-            // 节流进度更新：首张 + 每 150ms 更新一次，避免主线程压力
-            let now = CFAbsoluteTimeGetCurrent()
-            let shouldReport = index == 0 || (now - lastProgressTime) > 0.15 || index == imageFiles.count - 1
-            if shouldReport {
-                lastProgressTime = now
-                progressUpdate(TaskProgress(
-                    stage: .ocr, currentFile: index + 1, totalFiles: imageFiles.count,
-                    fileName: relativePath, message: "OCR 识别"
-                ))
-            }
+        let imageSemaphore = AsyncSemaphore(value: config.imageConcurrency)
+        let progressReporter = ImageProgressReporter(totalFiles: imageFiles.count, progressUpdate: progressUpdate)
 
-            // 加载图片（后台）
-            let cgImageOpt: CGImage? = await Task.detached(priority: .userInitiated) {
-                guard let src = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
-                      let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-                return img
-            }.value
-
-            guard let cgImage = cgImageOpt else {
-                Self.safeCopy(from: inputURL, to: outputURL)
-                stats.failed += 1
-                continue
-            }
-
-            // OCR
-            var stepStart = CFAbsoluteTimeGetCurrent()
-            let ocrResults: [OCRResult]
-            do {
-                ocrResults = try await ocrEngine.recognize(image: cgImage, languages: ocrLangs)
-            } catch {
-                Self.safeCopy(from: inputURL, to: outputURL)
-                stats.failed += 1
-                continue
-            }
-            stats.ocrTime += CFAbsoluteTimeGetCurrent() - stepStart
-
-            // 过滤无效 box
-            let validOCR = ocrResults.filter { $0.boundingBox.width > 0.001 && $0.boundingBox.height > 0.001 }
-
-            if validOCR.isEmpty {
-                Self.safeCopy(from: inputURL, to: outputURL)
-                stats.skipped += 1
-                continue
-            }
-
-            // 翻译
-            if shouldReport {
-                progressUpdate(TaskProgress(
-                    stage: .translating, currentFile: index + 1, totalFiles: imageFiles.count,
-                    fileName: relativePath, message: "翻译 \(validOCR.count) 块"
-                ))
-            }
-
-            stepStart = CFAbsoluteTimeGetCurrent()
-            let texts = validOCR.map(\.text)
-            let translations = await translateTextsBatch(
-                texts: texts,
-                from: settings.sourceLang,
-                to: settings.targetLang,
-                api: api,
-                cache: cache,
-                concurrency: settings.concurrency,
-                domainKey: settings.domain.rawValue
-            )
-            stats.translateTime += CFAbsoluteTimeGetCurrent() - stepStart
-
-            try Task.checkCancellation()
-
-            // 渲染 + 保存（后台）
-            if shouldReport {
-                progressUpdate(TaskProgress(
-                    stage: .rendering, currentFile: index + 1, totalFiles: imageFiles.count,
-                    fileName: relativePath, message: "渲染"
-                ))
-            }
-
-            stepStart = CFAbsoluteTimeGetCurrent()
-            let renderSuccess: Bool = await Task.detached(priority: .userInitiated) {
-                guard let rendered = ImageRenderer.renderTranslated(
-                    original: cgImage,
-                    ocrResults: validOCR,
-                    translations: translations
-                ) else { return false }
-
-                let imgFormat = ImageRenderer.imageFormat(for: outputURL)
-                do {
-                    try ImageRenderer.saveImage(rendered, to: outputURL, format: imgFormat)
-                    return true
-                } catch {
-                    return false
+        try await withThrowingTaskGroup(of: ProcessingStats.self) { group in
+            for (index, relativePath) in imageFiles.enumerated() {
+                group.addTask { [extractDir, outputDir, ocrLangs, api, cache, ocrEngine, config, imageSemaphore, progressReporter] in
+                    await imageSemaphore.wait()
+                    do {
+                        let imageStats = try await Self.processImage(
+                            index: index,
+                            relativePath: relativePath,
+                            extractDir: extractDir,
+                            outputDir: outputDir,
+                            ocrLangs: ocrLangs,
+                            config: config,
+                            api: api,
+                            cache: cache,
+                            ocrEngine: ocrEngine,
+                            progressReporter: progressReporter
+                        )
+                        await imageSemaphore.signal()
+                        return imageStats
+                    } catch {
+                        await imageSemaphore.signal()
+                        throw error
+                    }
                 }
-            }.value
-            stats.renderTime += CFAbsoluteTimeGetCurrent() - stepStart
-
-            if renderSuccess {
-                stats.translated += 1
-            } else {
-                Self.safeCopy(from: inputURL, to: outputURL)
-                stats.failed += 1
             }
+
+            for try await imageStats in group {
+                stats.merge(imageStats)
+            }
+        }
+
+        return stats
+    }
+
+    nonisolated private static func processImage(
+        index: Int,
+        relativePath: String,
+        extractDir: URL,
+        outputDir: URL,
+        ocrLangs: [String],
+        config: ImageProcessingConfig,
+        api: TranslationAPI,
+        cache: TranslationCache,
+        ocrEngine: OCREngine,
+        progressReporter: ImageProgressReporter
+    ) async throws -> ProcessingStats {
+        try Task.checkCancellation()
+
+        var stats = ProcessingStats()
+        let inputURL = extractDir.appendingPathComponent(relativePath)
+        let outputURL = outputDir.appendingPathComponent(relativePath)
+        let outputParent = outputURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: outputParent, withIntermediateDirectories: true)
+
+        await progressReporter.report(stage: .ocr, index: index, fileName: relativePath, message: "OCR 识别")
+
+        // 加载图片（后台）
+        let cgImageOpt: CGImage? = await Task.detached(priority: .userInitiated) {
+            guard let src = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+            return img
+        }.value
+
+        guard let cgImage = cgImageOpt else {
+            Self.safeCopy(from: inputURL, to: outputURL)
+            stats.failed += 1
+            return stats
+        }
+
+        // OCR
+        var stepStart = CFAbsoluteTimeGetCurrent()
+        let ocrResults: [OCRResult]
+        do {
+            ocrResults = try await ocrEngine.recognize(image: cgImage, languages: ocrLangs)
+        } catch {
+            Self.safeCopy(from: inputURL, to: outputURL)
+            stats.failed += 1
+            return stats
+        }
+        stats.ocrTime += CFAbsoluteTimeGetCurrent() - stepStart
+
+        let validOCR = ocrResults.filter { $0.boundingBox.width > 0.001 && $0.boundingBox.height > 0.001 }
+
+        if validOCR.isEmpty {
+            Self.safeCopy(from: inputURL, to: outputURL)
+            stats.skipped += 1
+            return stats
+        }
+
+        await progressReporter.report(stage: .translating, index: index, fileName: relativePath, message: "翻译 \(validOCR.count) 块")
+
+        stepStart = CFAbsoluteTimeGetCurrent()
+        let texts = validOCR.map(\.text)
+        let translations = await translateTextsBatch(
+            texts: texts,
+            from: config.sourceLang,
+            to: config.targetLang,
+            api: api,
+            cache: cache,
+            concurrency: config.apiConcurrencyPerImage,
+            domainKey: config.domainKey
+        )
+        stats.translateTime += CFAbsoluteTimeGetCurrent() - stepStart
+
+        try Task.checkCancellation()
+
+        await progressReporter.report(stage: .rendering, index: index, fileName: relativePath, message: "渲染")
+
+        stepStart = CFAbsoluteTimeGetCurrent()
+        let renderSuccess: Bool = await Task.detached(priority: .userInitiated) {
+            guard let rendered = ImageRenderer.renderTranslated(
+                original: cgImage,
+                ocrResults: validOCR,
+                translations: translations
+            ) else { return false }
+
+            let imgFormat = ImageRenderer.imageFormat(for: outputURL)
+            do {
+                try ImageRenderer.saveImage(rendered, to: outputURL, format: imgFormat)
+                return true
+            } catch {
+                return false
+            }
+        }.value
+        stats.renderTime += CFAbsoluteTimeGetCurrent() - stepStart
+
+        if renderSuccess {
+            stats.translated += 1
+        } else {
+            Self.safeCopy(from: inputURL, to: outputURL)
+            stats.failed += 1
         }
 
         return stats
