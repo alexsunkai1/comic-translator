@@ -268,6 +268,14 @@ final class ComicTranslator: ObservableObject {
                 progressUpdate: progressUpdate
             )
         }
+        if ext == "pdf" {
+            return try await processPDF(
+                inputURL: inputURL,
+                settings: settings,
+                api: api,
+                progressUpdate: progressUpdate
+            )
+        }
         return try await processArchive(
             inputURL: inputURL,
             settings: settings,
@@ -394,6 +402,80 @@ final class ComicTranslator: ObservableObject {
             counter += 1
         }
         return finalURL
+    }
+
+    // MARK: - PDF 处理流水线
+
+    private func processPDF(
+        inputURL: URL,
+        settings: AppSettings,
+        api: TranslationAPI,
+        progressUpdate: @escaping (TaskProgress) -> Void
+    ) async throws -> URL {
+        let pdfStart = CFAbsoluteTimeGetCurrent()
+        let outputURL = generatePDFOutputURL(from: inputURL)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ComicTranslatorPDF_\(UUID().uuidString)", isDirectory: true)
+        let pageDir = tempDir.appendingPathComponent("pages")
+        let outputDir = tempDir.appendingPathComponent("out")
+
+        try FileManager.default.createDirectory(at: pageDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        var stepStart = CFAbsoluteTimeGetCurrent()
+        progressUpdate(TaskProgress(
+            stage: .extracting,
+            currentFile: 0,
+            totalFiles: 1,
+            fileName: inputURL.lastPathComponent,
+            message: "渲染 PDF 页面"
+        ))
+
+        let pages = try await Task.detached(priority: .userInitiated) { [inputURL, pageDir] in
+            try PDFHandler.renderPages(from: inputURL, to: pageDir)
+        }.value
+        addLog(.info, "   📄 PDF 渲染完成：\(pages.count) 页 [\(formatElapsed(CFAbsoluteTimeGetCurrent() - stepStart))]")
+
+        try Task.checkCancellation()
+
+        let sourceLangOpt = LanguageOption.named(settings.sourceLang) ?? LanguageOption.auto
+        let ocrLangs = sourceLangOpt.ocrLanguages
+
+        let pageFiles = pages.map(\.relativePath)
+        let stats = try await processImages(
+            imageFiles: pageFiles,
+            extractDir: pageDir,
+            outputDir: outputDir,
+            ocrLangs: ocrLangs,
+            settings: settings,
+            api: api,
+            progressUpdate: progressUpdate
+        )
+
+        try Task.checkCancellation()
+
+        stepStart = CFAbsoluteTimeGetCurrent()
+        progressUpdate(TaskProgress(
+            stage: .packing,
+            currentFile: pages.count,
+            totalFiles: pages.count,
+            fileName: outputURL.lastPathComponent,
+            message: "生成 PDF"
+        ))
+
+        try await Task.detached(priority: .userInitiated) { [pages, outputDir, outputURL] in
+            try PDFHandler.createPDF(from: pages, imageDirectory: outputDir, to: outputURL)
+        }.value
+        let packTime = CFAbsoluteTimeGetCurrent() - stepStart
+
+        let totalTime = CFAbsoluteTimeGetCurrent() - pdfStart
+        addLog(.info, "   ⏱️ OCR: \(formatElapsed(stats.ocrTime)) | 翻译: \(formatElapsed(stats.translateTime)) | 渲染: \(formatElapsed(stats.renderTime)) | 生成 PDF: \(formatElapsed(packTime))")
+        addLog(.info, "   📊 \(stats.translated) 已翻译, \(stats.skipped) 无文字, \(stats.failed) 失败 | 总耗时: \(formatElapsed(totalTime))")
+
+        return outputURL
     }
 
     // MARK: - 单文件处理流水线（压缩包/漫画）
@@ -702,6 +784,32 @@ final class ComicTranslator: ObservableObject {
 
     private func generateOutputURL(from inputURL: URL, outputFormat: ArchiveFormat) -> URL {
         let dir = inputURL.deletingLastPathComponent()
+        let outputName = translatedOutputBaseName(from: inputURL)
+
+        // 避免覆盖已存在文件
+        var finalURL = dir.appendingPathComponent(outputName + "." + outputFormat.fileExtension)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: finalURL.path) {
+            finalURL = dir.appendingPathComponent("\(outputName)-\(counter).\(outputFormat.fileExtension)")
+            counter += 1
+        }
+        return finalURL
+    }
+
+    private func generatePDFOutputURL(from inputURL: URL) -> URL {
+        let dir = inputURL.deletingLastPathComponent()
+        let outputName = translatedOutputBaseName(from: inputURL)
+
+        var finalURL = dir.appendingPathComponent(outputName + ".pdf")
+        var counter = 2
+        while FileManager.default.fileExists(atPath: finalURL.path) {
+            finalURL = dir.appendingPathComponent("\(outputName)-\(counter).pdf")
+            counter += 1
+        }
+        return finalURL
+    }
+
+    private func translatedOutputBaseName(from inputURL: URL) -> String {
         let fileName = inputURL.lastPathComponent
         let lower = fileName.lowercased()
 
@@ -742,15 +850,7 @@ final class ComicTranslator: ObservableObject {
                 outputName = baseName + "-中文"
             }
         }
-
-        // 避免覆盖已存在文件
-        var finalURL = dir.appendingPathComponent(outputName + "." + outputFormat.fileExtension)
-        var counter = 2
-        while FileManager.default.fileExists(atPath: finalURL.path) {
-            finalURL = dir.appendingPathComponent("\(outputName)-\(counter).\(outputFormat.fileExtension)")
-            counter += 1
-        }
-        return finalURL
+        return outputName
     }
 }
 

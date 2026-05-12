@@ -170,7 +170,7 @@ struct ContentView: View {
             Text("拖拽文件到这里")
                 .font(.callout.bold())
                 .foregroundStyle(.secondary)
-            Text("支持压缩包 (ZIP/CBZ/RAR/7z) 和音视频 (MP4/MP3/M4A 等)")
+            Text("支持 PDF、压缩包 (ZIP/CBZ/RAR/7z) 和音视频 (MP4/MP3/M4A 等)")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Spacer()
@@ -775,11 +775,12 @@ struct ContentView: View {
     // MARK: - 支持的文件类型
 
     private static let archiveExts = ["zip", "cbz", "rar", "cbr", "7z", "gz", "bz2", "xz", "tar", "tgz"]
+    private static let documentExts = ["pdf"]
     private static let audioExts = ["m4a", "mp3", "wav", "aac", "flac", "aiff", "aif", "caf"]
     private static let videoExts = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "flv", "wmv", "mpg", "mpeg"]
 
     private static var allSupportedExts: [String] {
-        archiveExts + audioExts + videoExts
+        documentExts + archiveExts + audioExts + videoExts
     }
 
     private static func isSupportedFile(_ url: URL) -> Bool {
@@ -798,7 +799,7 @@ struct ContentView: View {
         panel.allowedContentTypes = types
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "选择压缩包、音频或视频（可多选）"
+        panel.message = "选择 PDF、压缩包、音频或视频（可多选）"
 
         if panel.runModal() == .OK {
             translator.addFiles(panel.urls)
