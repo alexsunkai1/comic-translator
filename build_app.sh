@@ -78,14 +78,18 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>public.app-category.utilities</string>
     <key>NSHumanReadableCopyright</key>
     <string>© 2026 TranScreen</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>用于识别音频/视频中的语音并翻译为字幕</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>用于语音识别（仅文件转写，不录音）</string>
 </dict>
 </plist>
 EOF
 
-# 6. Ad-hoc 签名
+# 6. Ad-hoc 签名（带 entitlements）
 echo ""
 echo "🔏 签名..."
-codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | grep -v "replacing existing signature" || true
+codesign --force --deep --sign - --entitlements ComicTranslator.entitlements "$APP_BUNDLE" 2>&1 | grep -v "replacing existing signature" || true
 
 # 7. 验证
 echo ""

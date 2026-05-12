@@ -13,6 +13,7 @@ struct LanguageOption: Identifiable, Hashable {
     static let allLanguages: [LanguageOption] = [
         LanguageOption(id: "zh-Hans", name: "简体中文", chineseName: "中文"),
         LanguageOption(id: "zh-Hant", name: "繁体中文", chineseName: "繁体中文"),
+        LanguageOption(id: "zh-HK", name: "粤语（广东话）", chineseName: "粤语"),
         LanguageOption(id: "en", name: "英语", chineseName: "英语"),
         LanguageOption(id: "ja", name: "日语", chineseName: "日语"),
         LanguageOption(id: "ko", name: "韩语", chineseName: "韩语"),
@@ -43,6 +44,7 @@ struct LanguageOption: Identifiable, Hashable {
         case "ko": return ["ko", "en-US"]
         case "zh-Hans": return ["zh-Hans", "en-US"]
         case "zh-Hant": return ["zh-Hant", "en-US"]
+        case "zh-HK": return ["zh-Hant", "zh-Hans", "en-US"]
         case "en": return ["en-US"]
         case "auto": return ["en-US", "ja", "ko", "zh-Hans", "zh-Hant", "it", "fr", "de", "es"]
         default: return [id, "en-US"]
@@ -101,6 +103,14 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(customDomainPrompt, forKey: "customDomainPrompt") }
     }
 
+    @Published var subtitleFormat: SubtitleFormat {
+        didSet { UserDefaults.standard.set(subtitleFormat.rawValue, forKey: "subtitleFormat") }
+    }
+
+    @Published var subtitleBilingual: Bool {
+        didSet { UserDefaults.standard.set(subtitleBilingual, forKey: "subtitleBilingual") }
+    }
+
     init() {
         let d = UserDefaults.standard
         self.apiEndpoint = d.string(forKey: "apiEndpoint") ?? "http://localhost:11434"
@@ -120,6 +130,10 @@ final class AppSettings: ObservableObject {
         let dom = d.string(forKey: "domain") ?? TranslationDomain.general.rawValue
         self.domain = TranslationDomain(rawValue: dom) ?? .general
         self.customDomainPrompt = d.string(forKey: "customDomainPrompt") ?? ""
+
+        let sub = d.string(forKey: "subtitleFormat") ?? SubtitleFormat.srt.rawValue
+        self.subtitleFormat = SubtitleFormat(rawValue: sub) ?? .srt
+        self.subtitleBilingual = d.object(forKey: "subtitleBilingual") == nil ? true : d.bool(forKey: "subtitleBilingual")
     }
 }
 
@@ -357,4 +371,22 @@ enum OutputFormat: String, CaseIterable, Identifiable {
         case .cbz: return "CBZ（漫画）"
         }
     }
+}
+
+// MARK: - 字幕输出格式（音视频专用）
+
+enum SubtitleFormat: String, CaseIterable, Identifiable {
+    case srt
+    case txt
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .srt: return "SRT（字幕）"
+        case .txt: return "TXT（纯文本）"
+        }
+    }
+
+    var fileExtension: String { rawValue }
 }

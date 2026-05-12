@@ -10,9 +10,12 @@ enum TaskStage: String, Sendable {
     case idle = "就绪"
     case extracting = "解压中"
     case ocr = "OCR 识别"
+    case transcribing = "语音转写"
+    case extractingAudio = "提取音频"
     case translating = "翻译中"
     case rendering = "渲染中"
     case packing = "打包中"
+    case writingSubtitle = "生成字幕"
     case completed = "已完成"
     case failed = "失败"
 }
@@ -83,6 +86,7 @@ final class ComicTranslator: ObservableObject {
 
     private let ocrEngine = OCREngine()
     private let cache = TranslationCache()
+    private let speechTranscriber = SpeechTranscriber()
     private var currentTask: Task<Void, Never>?
 
     private static let maxLogEntries = 2000
@@ -212,7 +216,7 @@ final class ComicTranslator: ObservableObject {
                 self.addLog(.info, "📂 [\(idx + 1)/\(total)] \(fileTask.inputURL.lastPathComponent)")
 
                 do {
-                    let output = try await self.processArchive(
+                    let output = try await self.processFile(
                         inputURL: fileTask.inputURL,
                         settings: settings,
                         api: api,
@@ -247,7 +251,152 @@ final class ComicTranslator: ObservableObject {
         }
     }
 
-    // MARK: - 单文件处理流水线
+    // MARK: - 文件分发（根据类型走不同处理流水线）
+
+    private func processFile(
+        inputURL: URL,
+        settings: AppSettings,
+        api: TranslationAPI,
+        progressUpdate: @escaping (TaskProgress) -> Void
+    ) async throws -> URL {
+        let ext = inputURL.pathExtension.lowercased()
+        if SpeechTranscriber.audioExtensions.contains(ext) || SpeechTranscriber.videoExtensions.contains(ext) {
+            return try await processMedia(
+                inputURL: inputURL,
+                settings: settings,
+                api: api,
+                progressUpdate: progressUpdate
+            )
+        }
+        return try await processArchive(
+            inputURL: inputURL,
+            settings: settings,
+            api: api,
+            progressUpdate: progressUpdate
+        )
+    }
+
+    // MARK: - 音视频转写 + 翻译 → SRT
+
+    private func processMedia(
+        inputURL: URL,
+        settings: AppSettings,
+        api: TranslationAPI,
+        progressUpdate: @escaping (TaskProgress) -> Void
+    ) async throws -> URL {
+        let mediaStart = CFAbsoluteTimeGetCurrent()
+        let fileName = inputURL.lastPathComponent
+        let ext = inputURL.pathExtension.lowercased()
+        let isVideo = SpeechTranscriber.videoExtensions.contains(ext)
+
+        // 1. 请求权限
+        let auth = await SpeechTranscriber.requestAuthorization()
+        guard auth == .authorized else {
+            throw SpeechTranscribeError.notAuthorized
+        }
+
+        // 2. 启动转写（如果是视频会内部先抽音频）
+        let stepStart = CFAbsoluteTimeGetCurrent()
+        if isVideo {
+            progressUpdate(TaskProgress(stage: .extractingAudio, currentFile: 0, totalFiles: 1, fileName: fileName, message: "提取音频轨"))
+        }
+
+        let langCode = settings.sourceLang  // "auto" / "ja" / "en" ...
+        let resolvedLocale = SpeechTranscriber.resolveLocale(code: langCode, fileName: fileName)
+        addLog(.info, "   🗣️ 识别语言: \(resolvedLocale.identifier) (源设置: \(langCode))")
+        progressUpdate(TaskProgress(stage: .transcribing, currentFile: 0, totalFiles: 1, fileName: fileName, message: "识别中 (\(resolvedLocale.identifier))"))
+
+        let segments = try await speechTranscriber.transcribe(
+            fileURL: inputURL,
+            languageCode: langCode,
+            progress: { p in
+                Task { @MainActor in
+                    progressUpdate(TaskProgress(
+                        stage: .transcribing,
+                        currentFile: Int(p * 100),
+                        totalFiles: 100,
+                        fileName: fileName,
+                        message: String(format: "识别中 %.0f%%", p * 100)
+                    ))
+                }
+            }
+        )
+        let transcribeTime = CFAbsoluteTimeGetCurrent() - stepStart
+        addLog(.info, "   🎙️ 识别完成：\(segments.count) 段 [\(formatElapsed(transcribeTime))]")
+
+        guard !segments.isEmpty else {
+            addLog(.warning, "   ⚠️ 未识别到语音。请确认源语言设置与音频实际语言一致")
+            throw TranslatorError.noTranscript
+        }
+
+        try Task.checkCancellation()
+
+        // 3. 批量翻译每段文字
+        progressUpdate(TaskProgress(
+            stage: .translating, currentFile: 0, totalFiles: segments.count,
+            fileName: fileName, message: "翻译 \(segments.count) 段字幕"
+        ))
+
+        let translateStart = CFAbsoluteTimeGetCurrent()
+        let texts = segments.map(\.text)
+        let translations = await translateTextsBatch(
+            texts: texts,
+            from: settings.sourceLang,
+            to: settings.targetLang,
+            api: api,
+            cache: cache,
+            concurrency: settings.concurrency,
+            domainKey: settings.domain.rawValue
+        )
+        let translateTime = CFAbsoluteTimeGetCurrent() - translateStart
+
+        try Task.checkCancellation()
+
+        // 4. 写入字幕文件
+        progressUpdate(TaskProgress(
+            stage: .writingSubtitle, currentFile: segments.count, totalFiles: segments.count,
+            fileName: fileName, message: "生成字幕"
+        ))
+
+        let writeStart = CFAbsoluteTimeGetCurrent()
+        let outputURL = generateSubtitleOutputURL(from: inputURL, kind: settings.subtitleFormat, bilingual: settings.subtitleBilingual)
+
+        try await Task.detached(priority: .userInitiated) { [outputURL, segments, translations, settings] in
+            switch settings.subtitleFormat {
+            case .srt:
+                if settings.subtitleBilingual {
+                    try SubtitleWriter.writeBilingualSRT(segments: segments, translations: translations, to: outputURL)
+                } else {
+                    try SubtitleWriter.writeTranslationSRT(segments: segments, translations: translations, to: outputURL)
+                }
+            case .txt:
+                try SubtitleWriter.writeTXT(segments: segments, translations: translations, to: outputURL, bilingual: settings.subtitleBilingual)
+            }
+        }.value
+        let writeTime = CFAbsoluteTimeGetCurrent() - writeStart
+
+        // 5. 统计
+        let totalTime = CFAbsoluteTimeGetCurrent() - mediaStart
+        addLog(.info, "   ⏱️ 转写: \(formatElapsed(transcribeTime)) | 翻译: \(formatElapsed(translateTime)) | 写入: \(formatElapsed(writeTime))")
+        addLog(.info, "   📊 \(segments.count) 段字幕 | 总耗时: \(formatElapsed(totalTime))")
+
+        return outputURL
+    }
+
+    private func generateSubtitleOutputURL(from inputURL: URL, kind: SubtitleFormat, bilingual: Bool) -> URL {
+        let dir = inputURL.deletingLastPathComponent()
+        let baseName = (inputURL.lastPathComponent as NSString).deletingPathExtension
+        let suffix = bilingual ? ".中文-双语" : ".中文"
+        var finalURL = dir.appendingPathComponent(baseName + suffix + "." + kind.fileExtension)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: finalURL.path) {
+            finalURL = dir.appendingPathComponent("\(baseName)\(suffix)-\(counter).\(kind.fileExtension)")
+            counter += 1
+        }
+        return finalURL
+    }
+
+    // MARK: - 单文件处理流水线（压缩包/漫画）
 
     private func processArchive(
         inputURL: URL,
@@ -610,12 +759,14 @@ final class ComicTranslator: ObservableObject {
 enum TranslatorError: Error, LocalizedError {
     case unsupportedFormat(String)
     case noImages
+    case noTranscript
     case cannotEnumerate
 
     var errorDescription: String? {
         switch self {
         case .unsupportedFormat(let ext): return "不支持的格式: \(ext)"
         case .noImages: return "压缩包中无图片文件"
+        case .noTranscript: return "未识别到语音内容。请检查：1) 源语言设置是否与音频语言一致 2) 音频是否有清晰人声"
         case .cannotEnumerate: return "无法遍历文件目录"
         }
     }

@@ -167,10 +167,10 @@ struct ContentView: View {
                         endPoint: .bottom
                     ))
             }
-            Text("拖拽压缩包到这里")
+            Text("拖拽文件到这里")
                 .font(.callout.bold())
                 .foregroundStyle(.secondary)
-            Text("支持 ZIP / CBZ / RAR / CBR / 7z / tar.gz，可多选")
+            Text("支持压缩包 (ZIP/CBZ/RAR/7z) 和音视频 (MP4/MP3/M4A 等)")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Spacer()
@@ -506,6 +506,35 @@ struct ContentView: View {
                     }
                     .labelsHidden()
                 }
+
+                Divider()
+
+                HStack {
+                    Text("字幕格式")
+                        .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $settings.subtitleFormat) {
+                        ForEach(SubtitleFormat.allCases) { fmt in
+                            Text(fmt.displayName).tag(fmt)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 140)
+
+                    Toggle("双语", isOn: $settings.subtitleBilingual)
+                        .toggleStyle(.checkbox)
+                        .help("输出原文+译文双语字幕")
+                }
+
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.blue)
+                        .font(.caption2)
+                    Text("音频/视频文件将使用 macOS 语音识别转写后翻译，输出字幕文件")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 4)
         } label: {
@@ -743,17 +772,33 @@ struct ContentView: View {
 
     // MARK: - 动作
 
+    // MARK: - 支持的文件类型
+
+    private static let archiveExts = ["zip", "cbz", "rar", "cbr", "7z", "gz", "bz2", "xz", "tar", "tgz"]
+    private static let audioExts = ["m4a", "mp3", "wav", "aac", "flac", "aiff", "aif", "caf"]
+    private static let videoExts = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "flv", "wmv", "mpg", "mpeg"]
+
+    private static var allSupportedExts: [String] {
+        archiveExts + audioExts + videoExts
+    }
+
+    private static func isSupportedFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return allSupportedExts.contains(ext)
+            || ArchiveFormat.from(fileName: url.lastPathComponent) != nil
+    }
+
     private func selectFiles() {
         let panel = NSOpenPanel()
         var types: [UTType] = []
-        for ext in ["zip", "cbz", "rar", "cbr", "7z", "gz", "bz2", "xz", "tar", "tgz"] {
+        for ext in Self.allSupportedExts {
             if let t = UTType(filenameExtension: ext) { types.append(t) }
         }
         if types.isEmpty { types = [.data] }
         panel.allowedContentTypes = types
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "选择要翻译的压缩包（可多选）"
+        panel.message = "选择压缩包、音频或视频（可多选）"
 
         if panel.runModal() == .OK {
             translator.addFiles(panel.urls)
@@ -761,6 +806,7 @@ struct ContentView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) {
+        let lock = NSLock()
         var urls: [URL] = []
         let group = DispatchGroup()
 
@@ -770,12 +816,14 @@ struct ContentView: View {
                 defer { group.leave() }
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                lock.lock()
                 urls.append(url)
+                lock.unlock()
             }
         }
 
         group.notify(queue: .main) {
-            let filtered = urls.filter { ArchiveFormat.from(fileName: $0.lastPathComponent) != nil }
+            let filtered = urls.filter { Self.isSupportedFile($0) }
             if !filtered.isEmpty {
                 self.translator.addFiles(filtered)
             }
