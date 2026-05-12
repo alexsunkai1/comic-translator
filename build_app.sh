@@ -7,15 +7,16 @@ cd "$(dirname "$0")"
 
 APP_NAME="ComicTranslator"
 BUNDLE_ID="com.transcreen.comictranslator"
-VERSION="1.1.0"
+VERSION="1.2.0"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$APP_NAME.app"
 
 echo "═══════════════════════════════════════════════"
-echo "📦 打包 $APP_NAME"
+echo "📦 打包 $APP_NAME v$VERSION"
 echo "═══════════════════════════════════════════════"
 
-# 1. 构建 Release 版本
+# 1. 构建 Release 版本（Universal Binary）
+echo ""
 echo "🔨 编译 Release 版本..."
 swift build -c release --arch arm64 --arch x86_64 2>&1 | tail -5 || swift build -c release
 
@@ -30,6 +31,7 @@ if [ ! -f "$EXECUTABLE" ]; then
 fi
 
 echo "✅ 编译完成: $EXECUTABLE"
+echo "   $(file "$EXECUTABLE" | sed 's/.*: //')"
 
 # 2. 清理旧的 app bundle
 rm -rf "$APP_BUNDLE"
@@ -80,19 +82,21 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# 6. 使用 ad-hoc 签名（允许本地运行）
+# 6. Ad-hoc 签名
+echo ""
 echo "🔏 签名..."
 codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 | grep -v "replacing existing signature" || true
 
+# 7. 验证
 echo ""
+APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1)
 echo "═══════════════════════════════════════════════"
 echo "✅ 打包完成！"
 echo "═══════════════════════════════════════════════"
+echo ""
 echo "📂 位置: $(pwd)/$APP_BUNDLE"
+echo "📏 大小: $APP_SIZE"
 echo ""
 echo "启动方式:"
 echo "   open $APP_BUNDLE"
-echo ""
-echo "或拖到 Applications 目录："
-echo "   mv $APP_BUNDLE /Applications/"
 echo ""

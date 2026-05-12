@@ -25,7 +25,7 @@ struct TaskProgress: Sendable {
     let message: String
 }
 
-// MARK: - 单文件任务状态（批量处理时每个文件一条）
+// MARK: - 单文件任务状态
 
 enum FileTaskStatus: Sendable {
     case pending
@@ -85,7 +85,13 @@ final class ComicTranslator: ObservableObject {
     private let cache = TranslationCache()
     private var currentTask: Task<Void, Never>?
 
-    /// 整体进度：已处理文件 / 总文件
+    private static let maxLogEntries = 2000
+    nonisolated static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "tiff", "tif", "bmp", "gif", "webp", "heic"
+    ]
+
+    // MARK: - 计算属性
+
     var overallProgress: (current: Int, total: Int) {
         let total = fileTasks.count
         let done = fileTasks.reduce(0) { count, task in
@@ -97,12 +103,10 @@ final class ComicTranslator: ObservableObject {
         return (done, total)
     }
 
-    /// 当前正在处理的文件（用于显示大进度条）
     var activeTask: FileTask? {
         fileTasks.first { if case .processing = $0.status { return true } else { return false } }
     }
 
-    /// 最近一次完成的输出（用于"在 Finder 中显示"按钮）
     var lastCompletedOutput: URL? {
         fileTasks.reversed().first { if case .completed = $0.status { return true } else { return false } }
             .flatMap { if case .completed(let url) = $0.status { return url } else { return nil } }
@@ -116,12 +120,11 @@ final class ComicTranslator: ObservableObject {
 
     func addFiles(_ urls: [URL]) {
         guard !isProcessing else { return }
-        let existing = Set(fileTasks.map { $0.inputURL.path })
-        for url in urls {
-            if !existing.contains(url.path) {
-                fileTasks.append(FileTask(inputURL: url))
-            }
-        }
+        let existing = Set(fileTasks.map(\.inputURL.path))
+        let newTasks = urls
+            .filter { !existing.contains($0.path) }
+            .map { FileTask(inputURL: $0) }
+        fileTasks.append(contentsOf: newTasks)
         batchCompleted = false
     }
 
@@ -167,9 +170,11 @@ final class ComicTranslator: ObservableObject {
             }
 
             let total = self.fileTasks.count
+            let batchStart = CFAbsoluteTimeGetCurrent()
             self.addLog(.info, "🚀 开始批量翻译 \(total) 个文件")
 
-            // 预先测试 API 连接（只测一次）
+            // 测试 API 连接
+            let connectStart = CFAbsoluteTimeGetCurrent()
             let apiConfig = TranslationConfig(
                 endpoint: settings.apiEndpoint,
                 apiKey: settings.apiKey,
@@ -188,13 +193,13 @@ final class ComicTranslator: ObservableObject {
                 }
                 return
             }
-            self.addLog(.success, "✅ API 连接成功 (\(settings.apiFormat.displayName))")
+            self.addLog(.success, "✅ API 连接成功 (\(settings.apiFormat.displayName)) [\(self.formatElapsed(CFAbsoluteTimeGetCurrent() - connectStart))]")
 
             if settings.domain != .general {
-                self.addLog(.info, "🎯 领域优化: \(settings.domain.displayName)")
+                self.addLog(.info, "🎯 领域: \(settings.domain.displayName)")
             }
 
-            self.addLog(.info, "═════════════════════════════════════")
+            self.addLog(.info, "─────────────────────────────────────")
 
             // 逐文件处理
             for idx in 0..<total {
@@ -203,6 +208,7 @@ final class ComicTranslator: ObservableObject {
                 let fileTask = self.fileTasks[idx]
                 self.currentBatchIndex = idx
                 self.fileTasks[idx].status = .processing
+                let fileStart = CFAbsoluteTimeGetCurrent()
                 self.addLog(.info, "📂 [\(idx + 1)/\(total)] \(fileTask.inputURL.lastPathComponent)")
 
                 do {
@@ -218,7 +224,8 @@ final class ComicTranslator: ObservableObject {
                     )
                     self.fileTasks[idx].status = .completed(output)
                     self.fileTasks[idx].outputURL = output
-                    self.addLog(.success, "✅ [\(idx + 1)/\(total)] \(output.lastPathComponent)")
+                    let elapsed = self.formatElapsed(CFAbsoluteTimeGetCurrent() - fileStart)
+                    self.addLog(.success, "✅ [\(idx + 1)/\(total)] \(output.lastPathComponent) [\(elapsed)]")
                 } catch {
                     if Task.isCancelled {
                         self.fileTasks[idx].status = .failed("已取消")
@@ -227,16 +234,20 @@ final class ComicTranslator: ObservableObject {
                     let msg = error.localizedDescription
                     self.fileTasks[idx].status = .failed(msg)
                     self.fileTasks[idx].errorMessage = msg
-                    self.addLog(.error, "❌ [\(idx + 1)/\(total)] \(msg)")
+                    let elapsed = self.formatElapsed(CFAbsoluteTimeGetCurrent() - fileStart)
+                    self.addLog(.error, "❌ [\(idx + 1)/\(total)] \(msg) [\(elapsed)]")
                 }
             }
 
-            self.addLog(.info, "═════════════════════════════════════")
+            self.addLog(.info, "─────────────────────────────────────")
             let successCount = self.fileTasks.filter { if case .completed = $0.status { return true } else { return false } }.count
             let failCount = self.fileTasks.filter { if case .failed = $0.status { return true } else { return false } }.count
-            self.addLog(.info, "📊 批量完成: \(successCount) 成功, \(failCount) 失败")
+            let batchElapsed = self.formatElapsed(CFAbsoluteTimeGetCurrent() - batchStart)
+            self.addLog(.info, "📊 完成: \(successCount) 成功, \(failCount) 失败 | 总耗时: \(batchElapsed)")
         }
     }
+
+    // MARK: - 单文件处理流水线
 
     private func processArchive(
         inputURL: URL,
@@ -244,9 +255,11 @@ final class ComicTranslator: ObservableObject {
         api: TranslationAPI,
         progressUpdate: @escaping (TaskProgress) -> Void
     ) async throws -> URL {
-        // 1. 识别输入格式
+        let archiveStart = CFAbsoluteTimeGetCurrent()
+
+        // 1. 识别格式
         guard let format = ArchiveFormat.from(fileName: inputURL.lastPathComponent) else {
-            throw NSError(domain: "Translator", code: 1, userInfo: [NSLocalizedDescriptionKey: "不支持的格式: \(inputURL.pathExtension)"])
+            throw TranslatorError.unsupportedFormat(inputURL.pathExtension)
         }
 
         // 2. 输出路径
@@ -262,84 +275,152 @@ final class ComicTranslator: ObservableObject {
         try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-        defer {
-            try? FileManager.default.removeItem(at: tempDir)
-        }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // 4. 解压
+        // 4. 解压（后台）
+        var stepStart = CFAbsoluteTimeGetCurrent()
         progressUpdate(TaskProgress(stage: .extracting, currentFile: 0, totalFiles: 1, fileName: inputURL.lastPathComponent, message: "解压中..."))
-        try ArchiveHandler.extract(inputURL, format: format, to: extractDir)
+        try await Task.detached(priority: .userInitiated) {
+            try ArchiveHandler.extract(inputURL, format: format, to: extractDir)
+        }.value
+        addLog(.info, "   📦 解压完成 [\(formatElapsed(CFAbsoluteTimeGetCurrent() - stepStart))]")
 
         try Task.checkCancellation()
 
-        // 5. 收集图片
-        let imageExts = Set(["png", "jpg", "jpeg", "tiff", "tif", "bmp", "gif", "webp", "heic"])
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(atPath: extractDir.path) else {
-            throw NSError(domain: "Translator", code: 3, userInfo: [NSLocalizedDescriptionKey: "无法遍历"])
-        }
-
-        var imageFiles: [String] = []
-        while let file = enumerator.nextObject() as? String {
-            let ext = (file as NSString).pathExtension.lowercased()
-            if imageExts.contains(ext) { imageFiles.append(file) }
-        }
-        imageFiles.sort()
+        // 5. 收集图片（后台）
+        let imageFiles = try await Task.detached(priority: .userInitiated) { [extractDir] in
+            try Self.collectImageFiles(in: extractDir)
+        }.value
 
         guard !imageFiles.isEmpty else {
-            throw NSError(domain: "Translator", code: 4, userInfo: [NSLocalizedDescriptionKey: "无图片文件"])
+            throw TranslatorError.noImages
         }
+        addLog(.info, "   🖼️ 发现 \(imageFiles.count) 张图片")
 
-        // 6. 源语言 OCR
+        // 6. OCR 语言
         let sourceLangOpt = LanguageOption.named(settings.sourceLang) ?? LanguageOption.auto
         let ocrLangs = sourceLangOpt.ocrLanguages
 
         // 7. 逐图处理
+        let stats = try await processImages(
+            imageFiles: imageFiles,
+            extractDir: extractDir,
+            outputDir: outputDir,
+            ocrLangs: ocrLangs,
+            settings: settings,
+            api: api,
+            progressUpdate: progressUpdate
+        )
+
+        try Task.checkCancellation()
+
+        // 8. 复制非图片文件（后台）
+        await Task.detached(priority: .userInitiated) { [extractDir, outputDir] in
+            Self.copyNonImageFiles(from: extractDir, to: outputDir)
+        }.value
+
+        // 9. 打包（后台）
+        stepStart = CFAbsoluteTimeGetCurrent()
+        progressUpdate(TaskProgress(stage: .packing, currentFile: imageFiles.count, totalFiles: imageFiles.count, fileName: outputURL.lastPathComponent, message: "打包"))
+        try await Task.detached(priority: .userInitiated) { [outputDir, outputURL, outputFormat] in
+            try ArchiveHandler.create(from: outputDir, to: outputURL, format: outputFormat)
+        }.value
+        let packTime = CFAbsoluteTimeGetCurrent() - stepStart
+
+        // 10. 耗时统计
+        let totalTime = CFAbsoluteTimeGetCurrent() - archiveStart
+        addLog(.info, "   ⏱️ OCR: \(formatElapsed(stats.ocrTime)) | 翻译: \(formatElapsed(stats.translateTime)) | 渲染: \(formatElapsed(stats.renderTime)) | 打包: \(formatElapsed(packTime))")
+        addLog(.info, "   📊 \(stats.translated) 已翻译, \(stats.skipped) 无文字, \(stats.failed) 失败 | 总耗时: \(formatElapsed(totalTime))")
+
+        return outputURL
+    }
+
+    // MARK: - 图片处理
+
+    private struct ProcessingStats: Sendable {
         var translated = 0
         var skipped = 0
         var failed = 0
+        var ocrTime: Double = 0
+        var translateTime: Double = 0
+        var renderTime: Double = 0
+    }
+
+    private func processImages(
+        imageFiles: [String],
+        extractDir: URL,
+        outputDir: URL,
+        ocrLangs: [String],
+        settings: AppSettings,
+        api: TranslationAPI,
+        progressUpdate: @escaping (TaskProgress) -> Void
+    ) async throws -> ProcessingStats {
+        var stats = ProcessingStats()
+        var lastProgressTime: CFAbsoluteTime = 0
 
         for (index, relativePath) in imageFiles.enumerated() {
             try Task.checkCancellation()
 
-            let inputPath = extractDir.appendingPathComponent(relativePath).path
-            let outputPath = outputDir.appendingPathComponent(relativePath).path
-            let outputParent = (outputPath as NSString).deletingLastPathComponent
-            try? fm.createDirectory(atPath: outputParent, withIntermediateDirectories: true)
+            let inputURL = extractDir.appendingPathComponent(relativePath)
+            let outputURL = outputDir.appendingPathComponent(relativePath)
+            let outputParent = outputURL.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: outputParent, withIntermediateDirectories: true)
 
-            progressUpdate(TaskProgress(
-                stage: .ocr, currentFile: index + 1, totalFiles: imageFiles.count,
-                fileName: relativePath, message: "OCR 识别"
-            ))
+            // 节流进度更新：首张 + 每 150ms 更新一次，避免主线程压力
+            let now = CFAbsoluteTimeGetCurrent()
+            let shouldReport = index == 0 || (now - lastProgressTime) > 0.15 || index == imageFiles.count - 1
+            if shouldReport {
+                lastProgressTime = now
+                progressUpdate(TaskProgress(
+                    stage: .ocr, currentFile: index + 1, totalFiles: imageFiles.count,
+                    fileName: relativePath, message: "OCR 识别"
+                ))
+            }
 
-            guard let imageSource = CGImageSourceCreateWithURL(URL(fileURLWithPath: inputPath) as CFURL, nil),
-                  let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-                try? fm.copyItem(atPath: inputPath, toPath: outputPath)
-                failed += 1
+            // 加载图片（后台）
+            let cgImageOpt: CGImage? = await Task.detached(priority: .userInitiated) {
+                guard let src = CGImageSourceCreateWithURL(inputURL as CFURL, nil),
+                      let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+                return img
+            }.value
+
+            guard let cgImage = cgImageOpt else {
+                Self.safeCopy(from: inputURL, to: outputURL)
+                stats.failed += 1
                 continue
             }
 
+            // OCR
+            var stepStart = CFAbsoluteTimeGetCurrent()
             let ocrResults: [OCRResult]
             do {
                 ocrResults = try await ocrEngine.recognize(image: cgImage, languages: ocrLangs)
             } catch {
-                try? fm.copyItem(atPath: inputPath, toPath: outputPath)
-                failed += 1
+                Self.safeCopy(from: inputURL, to: outputURL)
+                stats.failed += 1
+                continue
+            }
+            stats.ocrTime += CFAbsoluteTimeGetCurrent() - stepStart
+
+            // 过滤无效 box
+            let validOCR = ocrResults.filter { $0.boundingBox.width > 0.001 && $0.boundingBox.height > 0.001 }
+
+            if validOCR.isEmpty {
+                Self.safeCopy(from: inputURL, to: outputURL)
+                stats.skipped += 1
                 continue
             }
 
-            if ocrResults.isEmpty {
-                try? fm.copyItem(atPath: inputPath, toPath: outputPath)
-                skipped += 1
-                continue
+            // 翻译
+            if shouldReport {
+                progressUpdate(TaskProgress(
+                    stage: .translating, currentFile: index + 1, totalFiles: imageFiles.count,
+                    fileName: relativePath, message: "翻译 \(validOCR.count) 块"
+                ))
             }
 
-            progressUpdate(TaskProgress(
-                stage: .translating, currentFile: index + 1, totalFiles: imageFiles.count,
-                fileName: relativePath, message: "翻译 \(ocrResults.count) 个文本块"
-            ))
-
-            let texts = ocrResults.map(\.text)
+            stepStart = CFAbsoluteTimeGetCurrent()
+            let texts = validOCR.map(\.text)
             let translations = await translateTextsBatch(
                 texts: texts,
                 from: settings.sourceLang,
@@ -349,68 +430,111 @@ final class ComicTranslator: ObservableObject {
                 concurrency: settings.concurrency,
                 domainKey: settings.domain.rawValue
             )
+            stats.translateTime += CFAbsoluteTimeGetCurrent() - stepStart
 
-            progressUpdate(TaskProgress(
-                stage: .rendering, currentFile: index + 1, totalFiles: imageFiles.count,
-                fileName: relativePath, message: "渲染"
-            ))
+            try Task.checkCancellation()
 
-            guard let rendered = ImageRenderer.renderTranslated(
-                original: cgImage,
-                ocrResults: ocrResults,
-                translations: translations
-            ) else {
-                try? fm.copyItem(atPath: inputPath, toPath: outputPath)
-                failed += 1
-                continue
+            // 渲染 + 保存（后台）
+            if shouldReport {
+                progressUpdate(TaskProgress(
+                    stage: .rendering, currentFile: index + 1, totalFiles: imageFiles.count,
+                    fileName: relativePath, message: "渲染"
+                ))
             }
 
-            let outUrl = URL(fileURLWithPath: outputPath)
-            let imgFormat = ImageRenderer.imageFormat(for: outUrl)
+            stepStart = CFAbsoluteTimeGetCurrent()
+            let renderSuccess: Bool = await Task.detached(priority: .userInitiated) {
+                guard let rendered = ImageRenderer.renderTranslated(
+                    original: cgImage,
+                    ocrResults: validOCR,
+                    translations: translations
+                ) else { return false }
 
-            do {
-                try ImageRenderer.saveImage(rendered, to: outUrl, format: imgFormat)
-                translated += 1
-            } catch {
-                try? fm.copyItem(atPath: inputPath, toPath: outputPath)
-                failed += 1
-            }
-        }
-
-        // 8. 复制非图片文件
-        if let enumerator2 = fm.enumerator(atPath: extractDir.path) {
-            while let file = enumerator2.nextObject() as? String {
-                let ext = (file as NSString).pathExtension.lowercased()
-                if !imageExts.contains(ext) {
-                    let src = extractDir.appendingPathComponent(file).path
-                    let dst = outputDir.appendingPathComponent(file).path
-                    var isDir: ObjCBool = false
-                    if fm.fileExists(atPath: src, isDirectory: &isDir), !isDir.boolValue {
-                        let dstParent = (dst as NSString).deletingLastPathComponent
-                        try? fm.createDirectory(atPath: dstParent, withIntermediateDirectories: true)
-                        try? fm.copyItem(atPath: src, toPath: dst)
-                    }
+                let imgFormat = ImageRenderer.imageFormat(for: outputURL)
+                do {
+                    try ImageRenderer.saveImage(rendered, to: outputURL, format: imgFormat)
+                    return true
+                } catch {
+                    return false
                 }
+            }.value
+            stats.renderTime += CFAbsoluteTimeGetCurrent() - stepStart
+
+            if renderSuccess {
+                stats.translated += 1
+            } else {
+                Self.safeCopy(from: inputURL, to: outputURL)
+                stats.failed += 1
             }
         }
 
-        // 9. 打包
-        progressUpdate(TaskProgress(
-            stage: .packing, currentFile: imageFiles.count, totalFiles: imageFiles.count,
-            fileName: outputURL.lastPathComponent, message: "打包"
-        ))
-        try ArchiveHandler.create(from: outputDir, to: outputURL, format: outputFormat)
+        return stats
+    }
 
-        addLog(.info, "   📊 \(translated) 已翻译, \(skipped) 无文字, \(failed) 失败")
+    // MARK: - 辅助方法（nonisolated，可在 detached Task 中调用）
 
-        return outputURL
+    nonisolated static func collectImageFiles(in directory: URL) throws -> [String] {
+        guard let enumerator = FileManager.default.enumerator(atPath: directory.path) else {
+            throw TranslatorError.cannotEnumerate
+        }
+        var files: [String] = []
+        while let file = enumerator.nextObject() as? String {
+            let ext = (file as NSString).pathExtension.lowercased()
+            if imageExtensions.contains(ext) {
+                files.append(file)
+            }
+        }
+        files.sort()
+        return files
+    }
+
+    nonisolated static func copyNonImageFiles(from sourceDir: URL, to destDir: URL) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(atPath: sourceDir.path) else { return }
+        while let file = enumerator.nextObject() as? String {
+            let ext = (file as NSString).pathExtension.lowercased()
+            guard !imageExtensions.contains(ext) else { continue }
+            let src = sourceDir.appendingPathComponent(file)
+            let dst = destDir.appendingPathComponent(file)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: src.path, isDirectory: &isDir), !isDir.boolValue {
+                try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fm.fileExists(atPath: dst.path) {
+                    try? fm.removeItem(at: dst)
+                }
+                try? fm.copyItem(at: src, to: dst)
+            }
+        }
+    }
+
+    /// 安全复制（目标已存在时先删除，避免 copyItem 失败）
+    nonisolated static func safeCopy(from src: URL, to dst: URL) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: dst.path) {
+            try? fm.removeItem(at: dst)
+        }
+        try? fm.copyItem(at: src, to: dst)
     }
 
     func addLog(_ level: LogEntry.Level, _ message: String) {
         let entry = LogEntry(timestamp: Date(), level: level, message: message)
         logs.append(entry)
-        if logs.count > 1000 {
-            logs.removeFirst(logs.count - 1000)
+        if logs.count > Self.maxLogEntries {
+            logs.removeFirst(logs.count - Self.maxLogEntries)
+        }
+    }
+
+    /// 格式化耗时为可读字符串
+    func formatElapsed(_ seconds: Double) -> String {
+        if seconds < 1 {
+            return String(format: "%.0fms", seconds * 1000)
+        } else if seconds < 60 {
+            return String(format: "%.1fs", seconds)
+        } else {
+            let min = Int(seconds) / 60
+            let sec = seconds - Double(min * 60)
+            return String(format: "%dm%.1fs", min, sec)
         }
     }
 
@@ -440,27 +564,37 @@ final class ComicTranslator: ObservableObject {
             baseName = (fileName as NSString).deletingPathExtension
         }
 
+        // 按长度降序（避免 "Japanese" 被 "JP" 先匹配），长匹配优先
         let patterns = [
-            "日文", "日语", "Japanese", "japanese", "JP", "jp", "JA", "ja",
-            "イタリア翻訳", "イタリア語", "Italian", "italian",
-            "英文", "英语", "English", "english",
-            "韩文", "韩语", "Korean", "korean",
-            "French", "french", "Deutsch", "deutsch", "German", "german"
+            "イタリア翻訳", "イタリア語",
+            "Japanese", "japanese", "Italian", "italian",
+            "Korean", "korean", "French", "french",
+            "Deutsch", "deutsch", "German", "german",
+            "English", "english",
+            "日文", "日语", "英文", "英语", "韩文", "韩语",
+            "[JP]", "[jp]", "[JA]", "[ja]", "(JP)", "(jp)", "(JA)", "(ja)"
         ]
+
         var outputName = baseName
         var replaced = false
-        for p in patterns {
-            if baseName.contains(p) {
-                outputName = baseName.replacingOccurrences(of: p, with: "中文")
-                replaced = true
-                break
+
+        // 避免给已经是 "中文" 的文件再加 "-中文"
+        if baseName.contains("中文") || baseName.contains("Chinese") || baseName.contains("chinese") {
+            replaced = true  // 已是中文版，不重复添加
+        } else {
+            for p in patterns {
+                if baseName.contains(p) {
+                    outputName = baseName.replacingOccurrences(of: p, with: "中文")
+                    replaced = true
+                    break
+                }
+            }
+            if !replaced {
+                outputName = baseName + "-中文"
             }
         }
-        if !replaced {
-            outputName = baseName + "-中文"
-        }
 
-        // 避免覆盖已存在的文件
+        // 避免覆盖已存在文件
         var finalURL = dir.appendingPathComponent(outputName + "." + outputFormat.fileExtension)
         var counter = 2
         while FileManager.default.fileExists(atPath: finalURL.path) {
@@ -468,5 +602,21 @@ final class ComicTranslator: ObservableObject {
             counter += 1
         }
         return finalURL
+    }
+}
+
+// MARK: - 错误类型
+
+enum TranslatorError: Error, LocalizedError {
+    case unsupportedFormat(String)
+    case noImages
+    case cannotEnumerate
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedFormat(let ext): return "不支持的格式: \(ext)"
+        case .noImages: return "压缩包中无图片文件"
+        case .cannotEnumerate: return "无法遍历文件目录"
+        }
     }
 }

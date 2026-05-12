@@ -17,9 +17,10 @@ struct ContentView: View {
 
     var body: some View {
         HSplitView {
-            // 左侧：设置
+            // 左侧：设置面板
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
+                    headerBanner
                     apiSection
                     languageSection
                     domainSection
@@ -28,6 +29,7 @@ struct ContentView: View {
                 .padding()
             }
             .frame(minWidth: 380)
+            .background(Color(nsColor: .controlBackgroundColor))
 
             // 右侧：文件列表和日志
             VSplitView {
@@ -35,11 +37,34 @@ struct ContentView: View {
                     .frame(minHeight: 240)
 
                 logsView
-                    .frame(minHeight: 160)
+                    .frame(minHeight: 180)
             }
-            .frame(minWidth: 440)
+            .frame(minWidth: 460)
         }
-        .frame(minWidth: 840, minHeight: 620)
+        .frame(minWidth: 860, minHeight: 640)
+    }
+
+    // MARK: - 顶部标题
+
+    private var headerBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "character.book.closed.fill")
+                .font(.title2)
+                .foregroundStyle(.linearGradient(
+                    colors: [.blue, .purple],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("漫画翻译器")
+                    .font(.headline)
+                Text("v1.2.0")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.bottom, 4)
     }
 
     // MARK: - 文件列表区
@@ -48,13 +73,17 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Label("待翻译文件", systemImage: "doc.on.doc")
+                Label("待翻译文件", systemImage: "doc.on.doc.fill")
                     .font(.callout.bold())
+                    .foregroundStyle(.primary)
 
                 if !translator.fileTasks.isEmpty {
                     Text("(\(translator.overallProgress.current)/\(translator.overallProgress.total))")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.secondary.opacity(0.1)))
                 }
 
                 Spacer()
@@ -77,12 +106,14 @@ struct ContentView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(.red)
                         .disabled(translator.isProcessing)
                     }
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
 
             Divider()
 
@@ -91,12 +122,12 @@ struct ContentView: View {
                 emptyStateView
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: 6) {
                         ForEach(translator.fileTasks) { task in
                             fileTaskRow(task)
                         }
                     }
-                    .padding(8)
+                    .padding(10)
                 }
             }
 
@@ -106,9 +137,14 @@ struct ContentView: View {
             actionBar
         }
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(isDropTargeted ? Color.accentColor : Color.clear, lineWidth: 2)
-                .padding(4)
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(
+                    isDropTargeted
+                        ? Color.accentColor.opacity(0.8)
+                        : Color.clear,
+                    lineWidth: 2.5
+                )
+                .padding(3)
         )
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers: providers)
@@ -117,15 +153,24 @@ struct ContentView: View {
     }
 
     private var emptyStateView: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             Spacer()
-            Image(systemName: "arrow.down.doc.fill")
-                .font(.system(size: 40))
-                .foregroundStyle(.tertiary)
-            Text("拖拽压缩包到这里，或点击「添加」按钮")
-                .font(.callout)
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.08))
+                    .frame(width: 80, height: 80)
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.linearGradient(
+                        colors: [.blue.opacity(0.6), .purple.opacity(0.6)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ))
+            }
+            Text("拖拽压缩包到这里")
+                .font(.callout.bold())
                 .foregroundStyle(.secondary)
-            Text("支持 ZIP / CBZ / RAR / CBR / 7z / tar.gz 等，可一次添加多个")
+            Text("支持 ZIP / CBZ / RAR / CBR / 7z / tar.gz，可多选")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             Spacer()
@@ -135,32 +180,41 @@ struct ContentView: View {
     }
 
     private func fileTaskRow(_ task: FileTask) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
                 statusIcon(for: task.status)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(task.inputURL.lastPathComponent)
                         .font(.callout)
                         .lineLimit(1)
                         .truncationMode(.middle)
 
                     if let output = task.outputURL {
-                        Text("→ " + output.lastPathComponent)
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.right")
+                                .font(.caption2)
+                            Text(output.lastPathComponent)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.green)
                     } else if let err = task.errorMessage {
                         Text(err)
                             .font(.caption)
                             .foregroundStyle(.red)
                             .lineLimit(1)
                     } else if case .processing = task.status, let p = task.progress {
-                        Text("\(p.stage.rawValue) · \(p.message)")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
-                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Text(p.stage.rawValue)
+                                .fontWeight(.medium)
+                            Text("·")
+                            Text(p.message)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
                     } else {
                         Text(statusText(for: task.status))
                             .font(.caption)
@@ -176,6 +230,7 @@ struct ContentView: View {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     } label: {
                         Image(systemName: "folder")
+                            .foregroundStyle(.blue)
                     }
                     .buttonStyle(.borderless)
                     .help("在 Finder 中显示")
@@ -192,16 +247,18 @@ struct ContentView: View {
                 .help("移除")
             }
 
-            // 处理中的小进度条
+            // 处理中的进度条
             if case .processing = task.status, let p = task.progress, p.totalFiles > 0 {
                 ProgressView(value: Double(p.currentFile), total: Double(p.totalFiles))
                     .progressViewStyle(.linear)
                     .controlSize(.small)
+                    .tint(.blue)
             }
         }
-        .padding(8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 8)
                 .fill(backgroundColor(for: task.status))
         )
     }
@@ -210,8 +267,9 @@ struct ContentView: View {
     private func statusIcon(for status: FileTaskStatus) -> some View {
         switch status {
         case .pending:
-            Image(systemName: "circle")
+            Image(systemName: "circle.dashed")
                 .foregroundStyle(.tertiary)
+                .font(.body)
         case .processing:
             ProgressView()
                 .controlSize(.small)
@@ -219,34 +277,31 @@ struct ContentView: View {
         case .completed:
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
+                .font(.body)
         case .failed:
-            Image(systemName: "xmark.circle.fill")
+            Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
+                .font(.body)
         }
     }
 
     private func statusText(for status: FileTaskStatus) -> String {
-        switch status {
-        case .pending: return "等待中"
-        case .processing: return "处理中"
-        case .completed: return "完成"
-        case .failed: return "失败"
-        }
+        status.label
     }
 
     private func backgroundColor(for status: FileTaskStatus) -> Color {
         switch status {
         case .pending: return Color.secondary.opacity(0.04)
-        case .processing: return Color.blue.opacity(0.08)
-        case .completed: return Color.green.opacity(0.08)
-        case .failed: return Color.red.opacity(0.08)
+        case .processing: return Color.blue.opacity(0.06)
+        case .completed: return Color.green.opacity(0.06)
+        case .failed: return Color.red.opacity(0.06)
         }
     }
 
     // MARK: - 操作栏
 
     private var actionBar: some View {
-        HStack {
+        HStack(spacing: 10) {
             if translator.batchCompleted, let last = translator.lastCompletedOutput {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([last])
@@ -261,7 +316,8 @@ struct ContentView: View {
                 let prog = translator.overallProgress
                 if prog.total > 0 {
                     ProgressView(value: Double(prog.current), total: Double(prog.total))
-                        .frame(width: 120)
+                        .frame(width: 100)
+                        .tint(.blue)
                 }
                 Text("\(prog.current)/\(prog.total)")
                     .font(.caption.monospacedDigit())
@@ -275,6 +331,7 @@ struct ContentView: View {
                     translator.cancel()
                 }
                 .buttonStyle(.bordered)
+                .controlSize(.small)
                 .keyboardShortcut(".", modifiers: .command)
             }
 
@@ -282,27 +339,33 @@ struct ContentView: View {
                 translator.translateBatch(settings: settings)
             } label: {
                 if translator.isProcessing {
-                    Label("处理中...", systemImage: "arrow.triangle.2.circlepath")
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("处理中...")
+                    }
                 } else {
                     Label("开始翻译 (\(translator.fileTasks.count))", systemImage: "play.fill")
                 }
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
             .disabled(translator.fileTasks.isEmpty || translator.isProcessing)
             .keyboardShortcut(.return, modifiers: .command)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - API 配置
 
     private var apiSection: some View {
-        GroupBox("翻译 API") {
+        GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("API 类型")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Picker("", selection: $settings.apiFormat) {
                         ForEach(APIFormat.allCases) { format in
                             Text(format.displayName).tag(format)
@@ -319,6 +382,7 @@ struct ContentView: View {
                 HStack {
                     Text("Endpoint")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     TextField("API URL", text: $settings.apiEndpoint)
                         .textFieldStyle(.roundedBorder)
                     apiStatusIcon
@@ -328,6 +392,7 @@ struct ContentView: View {
                     HStack {
                         Text("API Key")
                             .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
                         SecureField("Bearer token", text: $settings.apiKey)
                             .textFieldStyle(.roundedBorder)
                     }
@@ -336,6 +401,7 @@ struct ContentView: View {
                 HStack {
                     Text("模型")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     if availableModels.isEmpty {
                         TextField("模型名称", text: $settings.modelID)
                             .textFieldStyle(.roundedBorder)
@@ -376,6 +442,9 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 4)
+        } label: {
+            Label("翻译 API", systemImage: "network")
+                .font(.callout.bold())
         }
     }
 
@@ -400,11 +469,12 @@ struct ContentView: View {
     // MARK: - 语言设置
 
     private var languageSection: some View {
-        GroupBox("语言设置") {
+        GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("源语言")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Picker("", selection: $settings.sourceLang) {
                         ForEach(LanguageOption.sourceLanguages) { lang in
                             Text(lang.name).tag(lang.id)
@@ -416,6 +486,7 @@ struct ContentView: View {
                 HStack {
                     Text("目标语言")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Picker("", selection: $settings.targetLang) {
                         ForEach(LanguageOption.allLanguages) { lang in
                             Text(lang.name).tag(lang.id)
@@ -427,6 +498,7 @@ struct ContentView: View {
                 HStack {
                     Text("输出格式")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Picker("", selection: $settings.outputFormat) {
                         ForEach(OutputFormat.allCases) { fmt in
                             Text(fmt.displayName).tag(fmt)
@@ -436,6 +508,9 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 4)
+        } label: {
+            Label("语言设置", systemImage: "globe")
+                .font(.callout.bold())
         }
     }
 
@@ -445,8 +520,6 @@ struct ContentView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("领域优化", systemImage: "target")
-                        .font(.callout.bold())
                     Spacer()
                     Picker("", selection: $settings.domain) {
                         ForEach(TranslationDomain.allCases) { domain in
@@ -459,7 +532,7 @@ struct ContentView: View {
 
                 if settings.domain != .general {
                     HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "info.circle")
+                        Image(systemName: "info.circle.fill")
                             .foregroundStyle(.blue)
                             .font(.caption)
                         Text(settings.domain.shortDescription)
@@ -468,8 +541,11 @@ struct ContentView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(8)
-                    .background(Color.blue.opacity(0.06))
-                    .cornerRadius(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.blue.opacity(0.05))
+                    )
                 }
 
                 if settings.domain == .custom {
@@ -480,7 +556,10 @@ struct ContentView: View {
                         TextEditor(text: $settings.customDomainPrompt)
                             .font(.system(.caption, design: .monospaced))
                             .frame(height: 80)
-                            .border(Color.secondary.opacity(0.3), width: 1)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                            )
                         Text("描述该领域的翻译要求，如术语表、风格偏好等")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
@@ -488,48 +567,59 @@ struct ContentView: View {
                 }
             }
             .padding(.vertical, 4)
+        } label: {
+            Label("领域优化", systemImage: "target")
+                .font(.callout.bold())
         }
     }
 
     // MARK: - 高级设置
 
     private var advancedSection: some View {
-        DisclosureGroup("高级设置") {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("并发数")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Stepper(value: $settings.concurrency, in: 1...16) {
                         Text("\(settings.concurrency) 路并行")
-                            .font(.callout)
+                            .font(.callout.monospacedDigit())
                     }
                 }
 
                 HStack {
                     Text("温度")
                         .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
                     Slider(value: $settings.temperature, in: 0...1, step: 0.1)
                     Text(String(format: "%.1f", settings.temperature))
                         .font(.callout.monospacedDigit())
                         .frame(width: 30)
                 }
 
-                VStack(alignment: .leading) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("自定义 Prompt 模板（可选）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     TextEditor(text: $settings.customPromptTemplate)
                         .font(.system(.caption, design: .monospaced))
                         .frame(height: 60)
-                        .border(Color.secondary.opacity(0.3), width: 1)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+                        )
                     Text("变量: {text} {source} {target} {domain}")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
             }
             .padding(.vertical, 6)
+        } label: {
+            Label("高级设置", systemImage: "gearshape.2")
+                .font(.callout.bold())
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 4)
     }
 
     // MARK: - 日志
@@ -537,33 +627,54 @@ struct ContentView: View {
     private var logsView: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Label("日志", systemImage: "list.bullet.rectangle")
+                Label("日志", systemImage: "terminal")
                     .font(.callout.bold())
+
+                if translator.isProcessing {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .padding(.leading, 4)
+                }
+
                 Spacer()
+
                 if !translator.logs.isEmpty {
+                    Text("\(translator.logs.count) 条")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.trailing, 4)
+
                     Button {
                         translator.logs.removeAll()
                     } label: {
                         Image(systemName: "trash")
+                            .font(.caption)
                     }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .help("清空日志")
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
 
             Divider()
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         if translator.logs.isEmpty {
-                            Text("暂无日志")
-                                .foregroundStyle(.tertiary)
-                                .font(.caption)
-                                .padding()
+                            VStack(spacing: 8) {
+                                Image(systemName: "text.alignleft")
+                                    .font(.title3)
+                                    .foregroundStyle(.tertiary)
+                                Text("暂无日志")
+                                    .foregroundStyle(.tertiary)
+                                    .font(.caption)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
                         } else {
                             ForEach(translator.logs) { log in
                                 logRow(log)
@@ -571,12 +682,13 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .padding(8)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: translator.logs.count) { _, _ in
                     if let last = translator.logs.last {
-                        withAnimation {
+                        withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
@@ -586,17 +698,29 @@ struct ContentView: View {
     }
 
     private func logRow(_ log: LogEntry) -> some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(logTimestamp(log.timestamp))
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .frame(width: 55, alignment: .leading)
+
             Circle()
                 .fill(colorForLevel(log.level))
-                .frame(width: 6, height: 6)
-                .padding(.top, 6)
+                .frame(width: 5, height: 5)
+
             Text(log.message)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(textColorForLevel(log.level))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
+        .padding(.vertical, 2)
+    }
+
+    private func logTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
     }
 
     private func colorForLevel(_ level: LogEntry.Level) -> Color {
@@ -627,7 +751,7 @@ struct ContentView: View {
         }
         if types.isEmpty { types = [.data] }
         panel.allowedContentTypes = types
-        panel.allowsMultipleSelection = true  // 启用多选
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.message = "选择要翻译的压缩包（可多选）"
 

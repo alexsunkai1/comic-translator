@@ -8,7 +8,7 @@ struct ComicTranslatorApp: App {
     var body: some Scene {
         WindowGroup("Comic Translator") {
             ContentView()
-                .frame(minWidth: 720, minHeight: 560)
+                .frame(minWidth: 860, minHeight: 640)
         }
         .windowResizability(.contentMinSize)
         .commands {

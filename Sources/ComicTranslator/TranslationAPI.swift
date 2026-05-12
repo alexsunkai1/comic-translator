@@ -242,8 +242,25 @@ struct OpenAICompatibleAPI: TranslationAPI {
     }
 
     func testConnection() async -> Bool {
+        // 优先尝试 /models 端点（几乎所有 OpenAI 兼容服务都支持，不消耗 token）
+        guard let url = URL(string: "\(config.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/models") else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        if !config.apiKey.isEmpty {
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 15
         do {
-            _ = try await translate(text: "hello", from: "en", to: "zh-Hans")
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let code = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) {
+                return true
+            }
+        } catch {
+            // 降级到真正的翻译调用
+        }
+        do {
+            _ = try await translate(text: "hi", from: "en", to: "zh-Hans")
             return true
         } catch {
             return false
@@ -315,15 +332,34 @@ private func postJSON(to urlString: String, body: [String: Any], apiKey: String 
 
 private func cleanResponse(_ content: String) -> String {
     var result = content.trimmingCharacters(in: .whitespacesAndNewlines)
-    // 移除可能的 <target></target> 标签
-    if result.hasPrefix("<target>") && result.hasSuffix("</target>") {
-        result = String(result.dropFirst(8).dropLast(9))
+
+    // 移除 <target></target>、<translation></translation> 标签
+    for tag in ["target", "translation", "output"] {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        if result.hasPrefix(open) && result.hasSuffix(close) {
+            result = String(result.dropFirst(open.count).dropLast(close.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
-    // 移除可能的引号
-    if (result.hasPrefix("\"") && result.hasSuffix("\"")) ||
-       (result.hasPrefix("「") && result.hasSuffix("」")) {
-        result = String(result.dropFirst().dropLast())
+
+    // 移除代码块围栏 ```...```
+    if result.hasPrefix("```") {
+        if let end = result.range(of: "```", options: .backwards), end.lowerBound != result.startIndex {
+            var inner = String(result[result.index(after: result.firstIndex(of: "\n") ?? result.startIndex)..<end.lowerBound])
+            inner = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inner.isEmpty { result = inner }
+        }
     }
+
+    // 移除成对包裹的引号
+    let quotePairs: [(String, String)] = [("\"", "\""), ("「", "」"), ("“", "”"), ("『", "』")]
+    for (o, c) in quotePairs {
+        if result.hasPrefix(o) && result.hasSuffix(c) && result.count > o.count + c.count {
+            result = String(result.dropFirst(o.count).dropLast(c.count))
+        }
+    }
+
     return result.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
@@ -339,17 +375,50 @@ private func applyTemplate(_ template: String, text: String, source: String, tar
         .replacingOccurrences(of: "{domain}", with: domain)
 }
 
-// MARK: - 翻译缓存 + 并发
+// MARK: - 翻译缓存（LRU 上限，避免无限增长）
 
 actor TranslationCache {
     private var cache: [String: String] = [:]
+    private var order: [String] = []  // 简易 LRU 顺序追踪
+    private let maxEntries: Int
+
+    init(maxEntries: Int = 5000) {
+        self.maxEntries = maxEntries
+    }
+
+    private func key(_ text: String, _ src: String, _ tgt: String, _ domain: String) -> String {
+        "\(src)|\(tgt)|\(domain.hashValue)|\(text)"
+    }
 
     func get(_ text: String, _ src: String, _ tgt: String, _ domain: String = "") -> String? {
-        cache["\(src)|\(tgt)|\(domain.hashValue)|\(text)"]
+        let k = key(text, src, tgt, domain)
+        guard let value = cache[k] else { return nil }
+        // 提升到末尾
+        if let idx = order.firstIndex(of: k) {
+            order.remove(at: idx)
+            order.append(k)
+        }
+        return value
     }
 
     func set(_ text: String, _ src: String, _ tgt: String, _ result: String, _ domain: String = "") {
-        cache["\(src)|\(tgt)|\(domain.hashValue)|\(text)"] = result
+        // 不缓存空译文（失败结果），避免永久失败
+        guard !result.isEmpty else { return }
+        let k = key(text, src, tgt, domain)
+        if cache[k] == nil {
+            order.append(k)
+        }
+        cache[k] = result
+        // LRU 淘汰
+        while order.count > maxEntries {
+            let old = order.removeFirst()
+            cache.removeValue(forKey: old)
+        }
+    }
+
+    func clear() {
+        cache.removeAll()
+        order.removeAll()
     }
 }
 
@@ -373,7 +442,7 @@ actor AsyncSemaphore {
     }
 }
 
-/// 带缓存和并发控制的批量翻译
+/// 带缓存、并发控制、去重和重试的批量翻译
 func translateTextsBatch(
     texts: [String],
     from source: String,
@@ -386,44 +455,69 @@ func translateTextsBatch(
     guard !texts.isEmpty else { return [] }
 
     var results = [String](repeating: "", count: texts.count)
-    var uncachedIndices: [Int] = []
-    var uncachedTexts: [String] = []
+
+    // 1. 先查缓存；同时对未命中的文本去重（相同文本只调用一次 API）
+    var uniqueTexts: [String] = []
+    var textToUniqueIdx: [String: Int] = [:]
+    // 每个原始索引 → 去重后的索引（或 -1 表示命中缓存）
+    var origToUnique: [Int] = Array(repeating: -1, count: texts.count)
 
     for (i, text) in texts.enumerated() {
-        if let cached = await cache.get(text, source, target, domainKey) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            results[i] = ""
+            continue
+        }
+        if let cached = await cache.get(trimmed, source, target, domainKey) {
             results[i] = cached
+            continue
+        }
+        if let u = textToUniqueIdx[trimmed] {
+            origToUnique[i] = u
         } else {
-            uncachedIndices.append(i)
-            uncachedTexts.append(text)
+            let u = uniqueTexts.count
+            textToUniqueIdx[trimmed] = u
+            uniqueTexts.append(trimmed)
+            origToUnique[i] = u
         }
     }
 
-    guard !uncachedTexts.isEmpty else { return results }
+    guard !uniqueTexts.isEmpty else { return results }
 
+    // 2. 并发翻译（失败后重试一次）
     let semaphore = AsyncSemaphore(value: max(1, concurrency))
+    var uniqueResults = [String](repeating: "", count: uniqueTexts.count)
 
-    let translated: [(Int, String)] = await withTaskGroup(of: (Int, String).self) { group in
-        for (idx, text) in uncachedTexts.enumerated() {
+    await withTaskGroup(of: (Int, String).self) { group in
+        for (idx, text) in uniqueTexts.enumerated() {
             group.addTask {
                 await semaphore.wait()
                 defer { Task { await semaphore.signal() } }
-                do {
-                    let t = try await api.translate(text: text, from: source, to: target)
-                    return (idx, t)
-                } catch {
-                    return (idx, "")
+                // 最多尝试 2 次
+                for attempt in 0..<2 {
+                    do {
+                        let t = try await api.translate(text: text, from: source, to: target)
+                        if !t.isEmpty { return (idx, t) }
+                    } catch {
+                        if attempt == 0 {
+                            try? await Task.sleep(nanoseconds: 300_000_000)  // 0.3s 退避
+                        }
+                    }
                 }
+                return (idx, "")
             }
         }
-        var arr: [(Int, String)] = []
-        for await item in group { arr.append(item) }
-        return arr
+        for await (idx, t) in group {
+            uniqueResults[idx] = t
+        }
     }
 
-    for (idx, t) in translated {
-        let originalIdx = uncachedIndices[idx]
-        results[originalIdx] = t
-        await cache.set(uncachedTexts[idx], source, target, t, domainKey)
+    // 3. 回填结果 + 写缓存（空结果不缓存）
+    for (i, u) in origToUnique.enumerated() where u >= 0 {
+        results[i] = uniqueResults[u]
+    }
+    for (idx, text) in uniqueTexts.enumerated() where !uniqueResults[idx].isEmpty {
+        await cache.set(text, source, target, uniqueResults[idx], domainKey)
     }
 
     return results
