@@ -55,7 +55,7 @@ actor SpeechTranscriber {
     func transcribe(
         fileURL: URL,
         languageCode: String,
-        progress: ((Double) -> Void)? = nil
+        progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> [TranscriptSegment] {
         // 1. 授权
         let status = await Self.requestAuthorization()

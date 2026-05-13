@@ -210,34 +210,45 @@ final class ComicTranslator: ObservableObject {
                 guard !Task.isCancelled else { break }
 
                 let fileTask = self.fileTasks[idx]
+                let taskID = fileTask.id
                 self.currentBatchIndex = idx
                 self.fileTasks[idx].status = .processing
                 let fileStart = CFAbsoluteTimeGetCurrent()
                 self.addLog(.info, "📂 [\(idx + 1)/\(total)] \(fileTask.inputURL.lastPathComponent)")
+
+                // 捕获弱引用而不是 self + idx，按 ID 查找任务，避免越界和竞争
+                let progressUpdate: @Sendable (TaskProgress) -> Void = { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.updateTaskProgress(id: taskID, progress: progress)
+                    }
+                }
 
                 do {
                     let output = try await self.processFile(
                         inputURL: fileTask.inputURL,
                         settings: settings,
                         api: api,
-                        progressUpdate: { @Sendable [weak self] progress in
-                            Task { @MainActor [weak self] in
-                                self?.fileTasks[idx].progress = progress
-                            }
-                        }
+                        progressUpdate: progressUpdate
                     )
-                    self.fileTasks[idx].status = .completed(output)
-                    self.fileTasks[idx].outputURL = output
+                    if let i = self.fileTasks.firstIndex(where: { $0.id == taskID }) {
+                        self.fileTasks[i].status = .completed(output)
+                        self.fileTasks[i].outputURL = output
+                    }
                     let elapsed = self.formatElapsed(CFAbsoluteTimeGetCurrent() - fileStart)
                     self.addLog(.success, "✅ [\(idx + 1)/\(total)] \(output.lastPathComponent) [\(elapsed)]")
                 } catch {
                     if Task.isCancelled {
-                        self.fileTasks[idx].status = .failed("已取消")
+                        if let i = self.fileTasks.firstIndex(where: { $0.id == taskID }) {
+                            self.fileTasks[i].status = .failed("已取消")
+                        }
                         break
                     }
                     let msg = error.localizedDescription
-                    self.fileTasks[idx].status = .failed(msg)
-                    self.fileTasks[idx].errorMessage = msg
+                    if let i = self.fileTasks.firstIndex(where: { $0.id == taskID }) {
+                        self.fileTasks[i].status = .failed(msg)
+                        self.fileTasks[i].errorMessage = msg
+                    }
                     let elapsed = self.formatElapsed(CFAbsoluteTimeGetCurrent() - fileStart)
                     self.addLog(.error, "❌ [\(idx + 1)/\(total)] \(msg) [\(elapsed)]")
                 }
@@ -835,6 +846,13 @@ final class ComicTranslator: ObservableObject {
         logs.append(entry)
         if logs.count > Self.maxLogEntries {
             logs.removeFirst(logs.count - Self.maxLogEntries)
+        }
+    }
+
+    /// 按 ID 更新任务进度（避免索引越界）
+    func updateTaskProgress(id: UUID, progress: TaskProgress) {
+        if let i = fileTasks.firstIndex(where: { $0.id == id }) {
+            fileTasks[i].progress = progress
         }
     }
 
