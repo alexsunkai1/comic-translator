@@ -83,6 +83,10 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(concurrency, forKey: "concurrency") }
     }
 
+    @Published var taskConcurrency: Int {
+        didSet { UserDefaults.standard.set(taskConcurrency, forKey: "taskConcurrency") }
+    }
+
     @Published var temperature: Double {
         didSet { UserDefaults.standard.set(temperature, forKey: "temperature") }
     }
@@ -121,7 +125,14 @@ final class AppSettings: ObservableObject {
         self.sourceLang = d.string(forKey: "sourceLang") ?? "it"
         self.targetLang = d.string(forKey: "targetLang") ?? "zh-Hans"
         let c = d.integer(forKey: "concurrency")
-        self.concurrency = c < 1 ? 4 : c
+        let normalizedConcurrency = c < 1 ? 4 : c
+        self.concurrency = normalizedConcurrency
+        let tc = d.integer(forKey: "taskConcurrency")
+        let normalizedTaskConcurrency = tc < 1 ? 1 : tc
+        self.taskConcurrency = normalizedTaskConcurrency <= normalizedConcurrency
+            && normalizedConcurrency % normalizedTaskConcurrency == 0
+            ? normalizedTaskConcurrency
+            : 1
         let t = d.double(forKey: "temperature")
         self.temperature = t == 0 ? 0.7 : t
         let out = d.string(forKey: "outputFormat") ?? OutputFormat.sameAsInput.rawValue
