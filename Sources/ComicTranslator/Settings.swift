@@ -115,6 +115,23 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(subtitleBilingual, forKey: "subtitleBilingual") }
     }
 
+    // 语音识别引擎
+    @Published var speechEngine: SpeechEngineType {
+        didSet { UserDefaults.standard.set(speechEngine.rawValue, forKey: "speechEngine") }
+    }
+
+    @Published var whisperEndpoint: String {
+        didSet { UserDefaults.standard.set(whisperEndpoint, forKey: "whisperEndpoint") }
+    }
+
+    @Published var whisperApiKey: String {
+        didSet { UserDefaults.standard.set(whisperApiKey, forKey: "whisperApiKey") }
+    }
+
+    @Published var whisperModel: String {
+        didSet { UserDefaults.standard.set(whisperModel, forKey: "whisperModel") }
+    }
+
     init() {
         let d = UserDefaults.standard
         self.apiEndpoint = d.string(forKey: "apiEndpoint") ?? "http://localhost:11434"
@@ -145,6 +162,12 @@ final class AppSettings: ObservableObject {
         let sub = d.string(forKey: "subtitleFormat") ?? SubtitleFormat.srt.rawValue
         self.subtitleFormat = SubtitleFormat(rawValue: sub) ?? .srt
         self.subtitleBilingual = d.object(forKey: "subtitleBilingual") == nil ? true : d.bool(forKey: "subtitleBilingual")
+
+        let se = d.string(forKey: "speechEngine") ?? SpeechEngineType.apple.rawValue
+        self.speechEngine = SpeechEngineType(rawValue: se) ?? .apple
+        self.whisperEndpoint = d.string(forKey: "whisperEndpoint") ?? "https://api.openai.com/v1"
+        self.whisperApiKey = d.string(forKey: "whisperApiKey") ?? ""
+        self.whisperModel = d.string(forKey: "whisperModel") ?? "whisper-1"
     }
 }
 
@@ -380,6 +403,32 @@ enum OutputFormat: String, CaseIterable, Identifiable {
         case .sameAsInput: return "与输入相同"
         case .zip: return "ZIP"
         case .cbz: return "CBZ（漫画）"
+        }
+    }
+}
+
+// MARK: - 语音识别引擎
+
+enum SpeechEngineType: String, CaseIterable, Identifiable {
+    case apple = "apple"
+    case whisperAPI = "whisper-api"
+    case mlxWhisper = "mlx-whisper"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .apple: return "Apple 系统识别"
+        case .whisperAPI: return "Whisper API"
+        case .mlxWhisper: return "MLX Whisper（本地）"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .apple: return "使用 macOS 内置语音识别（需开启听写）"
+        case .whisperAPI: return "OpenAI Whisper / Groq / 本地 whisper-server"
+        case .mlxWhisper: return "Apple Silicon 本地加速，需安装 mlx-whisper"
         }
     }
 }

@@ -530,10 +530,86 @@ struct ContentView: View {
                     Image(systemName: "info.circle")
                         .foregroundStyle(.blue)
                         .font(.caption2)
-                    Text("音频/视频文件将使用 macOS 语音识别转写后翻译，输出字幕文件")
+                    Text("音频/视频文件将使用语音识别转写后翻译，输出字幕文件")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                // 语音识别引擎
+                HStack {
+                    Text("识别引擎")
+                        .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: $settings.speechEngine) {
+                        ForEach(SpeechEngineType.allCases) { engine in
+                            Text(engine.displayName).tag(engine)
+                        }
+                    }
+                    .labelsHidden()
+                }
+
+                if settings.speechEngine == .whisperAPI {
+                    HStack {
+                        Text("Endpoint")
+                            .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                        TextField("https://api.openai.com/v1", text: $settings.whisperEndpoint)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    HStack {
+                        Text("API Key")
+                            .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                        SecureField("sk-...", text: $settings.whisperApiKey)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    HStack {
+                        Text("模型")
+                            .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                        TextField("whisper-1", text: $settings.whisperModel)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "lightbulb.min")
+                            .foregroundStyle(.orange)
+                            .font(.caption2)
+                        Text("兼容 OpenAI、Groq (whisper-large-v3-turbo)、本地 faster-whisper-server 等")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if settings.speechEngine == .mlxWhisper {
+                    HStack {
+                        Text("模型")
+                            .frame(width: 80, alignment: .trailing)
+                            .foregroundStyle(.secondary)
+                        TextField("mlx-community/whisper-large-v3-turbo", text: $settings.whisperModel)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "apple.logo")
+                            .foregroundStyle(.purple)
+                            .font(.caption2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Apple Silicon 本地加速，首次运行会自动下载模型")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Text("安装: pip3 install mlx-whisper")
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .padding(.vertical, 4)

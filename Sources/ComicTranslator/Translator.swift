@@ -322,24 +322,82 @@ final class ComicTranslator: ObservableObject {
 
         let langCode = settings.sourceLang  // "auto" / "ja" / "en" ...
         let resolvedLocale = SpeechTranscriber.resolveLocale(code: langCode, fileName: fileName)
-        addLog(.info, "   🗣️ 识别语言: \(resolvedLocale.identifier) (源设置: \(langCode))")
-        progressUpdate(TaskProgress(stage: .transcribing, currentFile: 0, totalFiles: 1, fileName: fileName, message: "识别中 (\(resolvedLocale.identifier))"))
+        addLog(.info, "   🗣️ 识别引擎: \(settings.speechEngine.displayName) | 语言: \(resolvedLocale.identifier)")
+        progressUpdate(TaskProgress(stage: .transcribing, currentFile: 0, totalFiles: 1, fileName: fileName, message: "识别中 (\(settings.speechEngine.displayName))"))
 
-        let segments = try await speechTranscriber.transcribe(
-            fileURL: inputURL,
-            languageCode: langCode,
-            progress: { p in
-                Task { @MainActor in
-                    progressUpdate(TaskProgress(
-                        stage: .transcribing,
-                        currentFile: Int(p * 100),
-                        totalFiles: 100,
-                        fileName: fileName,
-                        message: String(format: "识别中 %.0f%%", p * 100)
-                    ))
+        let segments: [TranscriptSegment]
+
+        switch settings.speechEngine {
+        case .apple:
+            segments = try await speechTranscriber.transcribe(
+                fileURL: inputURL,
+                languageCode: langCode,
+                progress: { p in
+                    Task { @MainActor in
+                        progressUpdate(TaskProgress(
+                            stage: .transcribing,
+                            currentFile: Int(p * 100),
+                            totalFiles: 100,
+                            fileName: fileName,
+                            message: String(format: "识别中 %.0f%%", p * 100)
+                        ))
+                    }
                 }
+            )
+
+        case .whisperAPI:
+            let whisperConfig = WhisperAPIConfig(
+                endpoint: settings.whisperEndpoint,
+                apiKey: settings.whisperApiKey,
+                model: settings.whisperModel,
+                language: langCode == "auto" ? nil : langCode
+            )
+            let whisper = WhisperAPI(config: whisperConfig)
+            segments = try await whisper.transcribe(
+                fileURL: inputURL,
+                progress: { p in
+                    Task { @MainActor in
+                        progressUpdate(TaskProgress(
+                            stage: .transcribing,
+                            currentFile: Int(p * 100),
+                            totalFiles: 100,
+                            fileName: fileName,
+                            message: String(format: "Whisper 识别中 %.0f%%", p * 100)
+                        ))
+                    }
+                }
+            )
+
+        case .mlxWhisper:
+            let rawModel = settings.whisperModel.trimmingCharacters(in: .whitespaces)
+            let mlxModel: String
+            if rawModel.isEmpty || rawModel == "whisper-1" {
+                mlxModel = "mlx-community/whisper-large-v3-turbo"
+            } else if rawModel.contains("/") || rawModel.hasPrefix("/") {
+                // 已有命名空间或是本地路径
+                mlxModel = rawModel
+            } else {
+                // 纯模型名，自动加 mlx-community/ 前缀
+                mlxModel = "mlx-community/\(rawModel)"
             }
-        )
+            addLog(.info, "   🧩 MLX 模型: \(mlxModel)")
+            let mlx = MLXWhisperEngine(model: mlxModel)
+            segments = try await mlx.transcribe(
+                fileURL: inputURL,
+                language: langCode == "auto" ? nil : langCode,
+                progress: { p in
+                    Task { @MainActor in
+                        progressUpdate(TaskProgress(
+                            stage: .transcribing,
+                            currentFile: Int(p * 100),
+                            totalFiles: 100,
+                            fileName: fileName,
+                            message: String(format: "MLX Whisper %.0f%%", p * 100)
+                        ))
+                    }
+                }
+            )
+        }
         let transcribeTime = CFAbsoluteTimeGetCurrent() - stepStart
         addLog(.info, "   🎙️ 识别完成：\(segments.count) 段 [\(formatElapsed(transcribeTime))]")
 
